@@ -1,0 +1,6 @@
+# First host is the control plane. Remaining hosts are workers.
+# Wireless/management IP     hostname
+192.168.1.50                 k3s-00
+192.168.1.51                 k3s-01
+192.168.1.52                 k3s-02
+

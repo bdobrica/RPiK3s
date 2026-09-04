@@ -1,0 +1,11 @@
+write-kubeconfig-mode: "0640"
+node-ip: "{{ internal_ip }}"
+advertise-address: "{{ internal_ip }}"
+flannel-iface: "{{ internal_interface }}"
+disable:
+  - traefik
+tls-san:
+  - "{{ internal_ip }}"
+  - "{{ ansible_host }}"
+default-local-storage-path: "{{ usb_mount_point }}/k3s-storage"
+

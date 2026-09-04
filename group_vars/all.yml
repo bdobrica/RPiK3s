@@ -1,0 +1,22 @@
+---
+internal_network_cidr: 10.10.10.0/24
+internal_network_prefix: 24
+internal_network_first_host: 10
+internal_interface: eth0
+usb_device: auto
+usb_mount_point: /mnt/usb
+usb_allow_format: false
+usb_force_format: false
+k3s_version: ""
+k3s_channel: stable
+nginx_ingress_version: v5.6.0
+cert_manager_version: v1.21.1
+sealed_secrets_version: v0.38.4
+sealed_secrets_image: docker.io/bitnami/sealed-secrets-controller:0.38.4
+prometheus_operator_version: v0.93.0
+flux_version: v2.9.2
+prometheus_image: quay.io/prometheus/prometheus:v3.11.2
+grafana_image: grafana/grafana:13.1.0
+prometheus_retention_size: 1GB
+prometheus_storage_size: 2Gi
+grafana_storage_size: 1Gi

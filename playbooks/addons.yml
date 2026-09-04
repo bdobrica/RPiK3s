@@ -1,0 +1,17 @@
+---
+- name: Install cluster add-ons
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  pre_tasks:
+    - name: Load optional private overrides
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      with_first_found:
+        - files: [group_vars.yml]
+          paths: ["{{ playbook_dir }}/../.env"]
+          skip: true
+  roles:
+    - addons

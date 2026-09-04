@@ -1,0 +1,42 @@
+---
+- name: Create k3s configuration directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+
+- name: Configure k3s server
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+  notify: Restart k3s
+  tags: [k3s_config]
+
+- name: Download the official k3s installer
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /usr/local/src/install-k3s.sh
+    mode: "0755"
+
+- name: Install k3s server
+  ansible.builtin.command: /usr/local/src/install-k3s.sh
+  environment:
+    INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  args:
+    creates: /usr/local/bin/k3s
+
+- name: Wait for Kubernetes API
+  ansible.builtin.command: k3s kubectl get nodes
+  register: api_ready
+  retries: 30
+  delay: 5
+  until: api_ready.rc == 0
+  changed_when: false
+
+- name: Read cluster join token
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_node_token
+  no_log: true

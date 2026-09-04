@@ -1,0 +1,47 @@
+---
+- name: Create k3s configuration directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+
+- name: Configure k3s agent
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+  notify: Restart k3s agent
+  tags: [k3s_config]
+
+- name: Persist control-plane URL in agent configuration
+  ansible.builtin.lineinfile:
+    path: /etc/rancher/k3s/config.yaml
+    regexp: '^server:'
+    line: 'server: "https://{{ hostvars[groups["control_plane"][0]].internal_ip }}:6443"'
+  notify: Restart k3s agent
+
+- name: Persist join token in agent configuration
+  ansible.builtin.lineinfile:
+    path: /etc/rancher/k3s/config.yaml
+    regexp: '^token:'
+    line: 'token: "{{ hostvars[groups["control_plane"][0]].k3s_node_token.content | b64decode | trim }}"'
+    mode: "0600"
+  no_log: true
+  notify: Restart k3s agent
+
+- name: Download the official k3s installer
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /usr/local/src/install-k3s.sh
+    mode: "0755"
+
+- name: Install k3s agent
+  ansible.builtin.command: /usr/local/src/install-k3s.sh
+  environment:
+    INSTALL_K3S_CHANNEL: "{{ k3s_channel }}"
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    K3S_URL: "https://{{ hostvars[groups['control_plane'][0]].internal_ip }}:6443"
+    K3S_TOKEN: "{{ hostvars[groups['control_plane'][0]].k3s_node_token.content | b64decode }}"
+  no_log: true
+  args:
+    creates: /usr/local/bin/k3s

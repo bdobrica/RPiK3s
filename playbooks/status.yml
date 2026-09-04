@@ -1,0 +1,13 @@
+---
+- name: Show cluster status
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Get nodes and pods
+      ansible.builtin.command: k3s kubectl get nodes,pods -A -o wide
+      register: cluster_status
+      changed_when: false
+    - ansible.builtin.debug:
+        var: cluster_status.stdout_lines
+

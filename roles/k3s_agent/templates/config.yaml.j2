@@ -1,0 +1,4 @@
+node-ip: "{{ internal_ip }}"
+flannel-iface: "{{ internal_interface }}"
+server: "https://{{ hostvars[groups['control_plane'][0]].internal_ip }}:6443"
+token: "{{ hostvars[groups['control_plane'][0]].k3s_node_token.content | b64decode | trim }}"

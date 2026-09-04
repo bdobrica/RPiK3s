@@ -1,0 +1,27 @@
+---
+# Copy this file to .env/group_vars.yml. All values shown are optional.
+internal_network_cidr: 10.10.10.0/24
+internal_network_prefix: 24
+internal_network_first_host: 10
+
+# "auto" accepts exactly one USB-backed partition with an existing filesystem.
+# For heterogeneous machines, set usb_device in host_vars instead.
+usb_device: auto
+usb_mount_point: /mnt/usb
+# DANGEROUS: only enable to create ext4 on an unformatted detected device.
+usb_allow_format: false
+# One-time destructive conversion to ext4. A marker prevents formatting on reruns.
+usb_force_format: false
+
+# Empty means the current stable k3s channel. Pin e.g. v1.34.1+k3s1 for repeatability.
+k3s_version: ""
+
+# Component versions are deliberately centralized for simple upgrades.
+nginx_ingress_version: v5.6.0
+cert_manager_version: v1.21.1
+sealed_secrets_version: v0.38.4
+sealed_secrets_image: docker.io/bitnami/sealed-secrets-controller:0.38.4
+prometheus_operator_version: v0.93.0
+flux_version: v2.9.2
+prometheus_image: quay.io/prometheus/prometheus:v3.11.2
+grafana_image: grafana/grafana:13.1.0

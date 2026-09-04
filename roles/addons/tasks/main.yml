@@ -1,0 +1,93 @@
+---
+- name: Create add-on working directory
+  ansible.builtin.file:
+    path: /var/lib/k3spi/addons
+    state: directory
+    mode: "0755"
+
+- name: Checkout maintained NGINX Ingress Controller manifests
+  ansible.builtin.git:
+    repo: https://github.com/nginx/kubernetes-ingress.git
+    version: "{{ nginx_ingress_version }}"
+    dest: /var/lib/k3spi/addons/nginx-ingress
+    depth: 1
+  register: nginx_checkout
+
+- name: Install NGINX Ingress Controller common resources
+  ansible.builtin.command:
+    argv: [k3s, kubectl, apply, -f, "{{ item }}"]
+  loop:
+    - /var/lib/k3spi/addons/nginx-ingress/deploy/crds.yaml
+    - /var/lib/k3spi/addons/nginx-ingress/deployments/common/ns-and-sa.yaml
+    - /var/lib/k3spi/addons/nginx-ingress/deployments/rbac/rbac.yaml
+    - /var/lib/k3spi/addons/nginx-ingress/deployments/common/nginx-config.yaml
+    - /var/lib/k3spi/addons/nginx-ingress/deployments/common/ingress-class.yaml
+    - /var/lib/k3spi/addons/nginx-ingress/deployments/daemon-set/nginx-ingress.yaml
+  register: nginx_apply
+  changed_when: "'created' in nginx_apply.stdout or 'configured' in nginx_apply.stdout"
+
+- name: Download pinned upstream add-on manifests
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "/var/lib/k3spi/addons/{{ item.name }}.yaml"
+    mode: "0644"
+  loop:
+    - { name: cert-manager, url: "https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.yaml" }
+    - { name: sealed-secrets, url: "https://github.com/bitnami-labs/sealed-secrets/releases/download/{{ sealed_secrets_version }}/controller.yaml" }
+    - { name: prometheus-operator, url: "https://github.com/prometheus-operator/prometheus-operator/releases/download/{{ prometheus_operator_version }}/bundle.yaml" }
+    - { name: flux, url: "https://github.com/fluxcd/flux2/releases/download/{{ flux_version }}/install.yaml" }
+
+- name: Correct stale image reference in Sealed Secrets release manifest
+  ansible.builtin.replace:
+    path: /var/lib/k3spi/addons/sealed-secrets.yaml
+    regexp: 'image: .*sealed-secrets-controller:.*'
+    replace: 'image: {{ sealed_secrets_image }}'
+
+- name: Apply pinned upstream add-ons
+  ansible.builtin.command: "k3s kubectl apply --server-side -f /var/lib/k3spi/addons/{{ item }}.yaml"
+  loop: [cert-manager, sealed-secrets, prometheus-operator, flux]
+  register: upstream_apply
+  changed_when: "'created' in upstream_apply.stdout or 'configured' in upstream_apply.stdout"
+
+- name: Enforce published Sealed Secrets controller image
+  ansible.builtin.command: >-
+    k3s kubectl set image deployment/sealed-secrets-controller
+    sealed-secrets-controller={{ sealed_secrets_image }} -n kube-system
+  register: sealed_secrets_image_update
+  changed_when: "'image updated' in sealed_secrets_image_update.stdout"
+
+- name: Wait for Prometheus CRD
+  ansible.builtin.command: k3s kubectl wait --for=condition=Established crd/prometheuses.monitoring.coreos.com --timeout=180s
+  changed_when: false
+
+- name: Generate and retain the Grafana admin password outside Git
+  ansible.builtin.set_fact:
+    grafana_admin_password: "{{ lookup('ansible.builtin.password', playbook_dir + '/../.env/grafana-admin-password', length=32) }}"
+  no_log: true
+
+- name: Ensure monitoring namespace exists before its credentials
+  ansible.builtin.command: k3s kubectl create namespace monitoring
+  register: monitoring_namespace
+  failed_when: monitoring_namespace.rc != 0 and 'AlreadyExists' not in monitoring_namespace.stderr
+  changed_when: monitoring_namespace.rc == 0
+
+- name: Create or update Grafana admin credential
+  ansible.builtin.shell: >-
+    k3s kubectl -n monitoring create secret generic grafana-admin
+    --from-literal=admin-user=admin
+    --from-literal=admin-password="$GRAFANA_ADMIN_PASSWORD"
+    --dry-run=client -o yaml | k3s kubectl apply -f -
+  environment:
+    GRAFANA_ADMIN_PASSWORD: "{{ grafana_admin_password }}"
+  no_log: true
+
+- name: Render lightweight observability stack
+  ansible.builtin.template:
+    src: observability.yaml.j2
+    dest: /var/lib/k3spi/addons/observability.yaml
+    mode: "0644"
+
+- name: Apply lightweight observability stack
+  ansible.builtin.command: k3s kubectl apply -f /var/lib/k3spi/addons/observability.yaml
+  register: observability_apply
+  changed_when: "'created' in observability_apply.stdout or 'configured' in observability_apply.stdout"

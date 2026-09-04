@@ -1,0 +1,21 @@
+---
+- name: Prepare Debian nodes
+  hosts: k3s_cluster
+  become: true
+  gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  pre_tasks:
+    - name: Load optional private overrides
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      with_first_found:
+        - files: [group_vars.yml]
+          paths: ["{{ playbook_dir }}/../.env"]
+          skip: true
+    - name: Require a Debian family host
+      ansible.builtin.assert:
+        that: ansible_facts['os_family'] == 'Debian'
+        fail_msg: "This role currently supports Debian-family systems only"
+  roles:
+    - prepare

@@ -1,0 +1,7 @@
+.env/*
+!.env/hosts.example
+!.env/group_vars.example.yml
+.cache/
+artifacts/
+*.retry
+

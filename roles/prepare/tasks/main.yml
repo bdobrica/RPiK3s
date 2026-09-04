@@ -1,0 +1,203 @@
+---
+- name: Update apt cache and upgrade the operating system
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: safe
+    cache_valid_time: 3600
+
+- name: Install administration and cluster prerequisites
+  ansible.builtin.apt:
+    name: [git, vim, screen, curl, ca-certificates, iptables, open-iscsi, nfs-common]
+    state: present
+
+- name: Enable Raspberry Pi memory cgroups required by k3s
+  ansible.builtin.lineinfile:
+    path: /boot/firmware/cmdline.txt
+    regexp: '^(?!.*cgroup_memory=1)(.*)$'
+    line: '\1 cgroup_memory=1 cgroup_enable=memory'
+    backrefs: true
+  register: memory_cgroup_boot
+
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Find the Ethernet connection profile
+  ansible.builtin.command: "nmcli -g GENERAL.CONNECTION device show {{ internal_interface }}"
+  register: ethernet_profile
+  changed_when: false
+  failed_when: false
+
+- name: Configure static private Ethernet connection
+  ansible.builtin.command:
+    argv:
+      - nmcli
+      - connection
+      - modify
+      - "{{ ethernet_profile.stdout }}"
+      - ipv4.method
+      - manual
+      - ipv4.addresses
+      - "{{ internal_ip }}/{{ internal_network_prefix }}"
+      - ipv4.gateway
+      - ""
+      - ipv4.never-default
+      - "yes"
+      - ipv6.method
+      - disabled
+  register: nmcli_config
+  changed_when: true
+  when: ethernet_profile.rc == 0 and ethernet_profile.stdout not in ['', '--']
+
+- name: Create Ethernet connection when the default profile does not exist
+  ansible.builtin.command:
+    argv: [nmcli, connection, add, type, ethernet, ifname, "{{ internal_interface }}", con-name, k3s-internal, ipv4.method, manual, ipv4.addresses, "{{ internal_ip }}/{{ internal_network_prefix }}", ipv4.never-default, "yes", ipv6.method, disabled]
+  when: ethernet_profile.rc != 0 or ethernet_profile.stdout in ['', '--']
+
+- name: Activate the internal connection
+  ansible.builtin.shell: >-
+    nmcli connection up '{{ ethernet_profile.stdout }}' || nmcli connection up k3s-internal
+  changed_when: false
+
+- name: Manage cluster host mappings
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} K3SPI MANAGED HOSTS"
+    block: |
+      {% for host in groups['k3s_cluster'] %}
+      {{ hostvars[host].internal_ip }} {{ host }}
+      {% endfor %}
+
+- name: Ensure per-node cluster SSH key exists
+  ansible.builtin.command: ssh-keygen -q -t ed25519 -N '' -C '{{ inventory_hostname }} cluster key' -f /home/{{ ansible_user }}/.ssh/id_ed25519_cluster
+  args:
+    creates: "/home/{{ ansible_user }}/.ssh/id_ed25519_cluster"
+  become_user: "{{ ansible_user }}"
+
+- name: Read node public key
+  ansible.builtin.slurp:
+    src: "/home/{{ ansible_user }}/.ssh/id_ed25519_cluster.pub"
+  register: node_public_key
+
+- name: Authorize every cluster node key
+  ansible.posix.authorized_key:
+    user: "{{ ansible_user }}"
+    key: "{{ hostvars[item].node_public_key.content | b64decode }}"
+    state: present
+  loop: "{{ groups['k3s_cluster'] }}"
+
+- name: Configure cluster SSH aliases
+  ansible.builtin.blockinfile:
+    path: "/home/{{ ansible_user }}/.ssh/config"
+    create: true
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: "0600"
+    marker: "# {mark} K3SPI MANAGED HOSTS"
+    block: |
+      Host{% for host in groups['k3s_cluster'] %} {{ host }}{% endfor %}
+        User {{ ansible_user }}
+        IdentityFile ~/.ssh/id_ed25519_cluster
+        StrictHostKeyChecking accept-new
+
+- name: Detect USB filesystem candidates
+  ansible.builtin.shell: |
+    set -o pipefail
+    for dev in $(lsblk -nrpo NAME,TYPE | awk '$2 == "part" {print $1}'); do
+      parent="$(lsblk -ndo PKNAME "$dev")"
+      [ -n "$parent" ] || continue
+      [ "$(lsblk -ndo TRAN "/dev/$parent")" = usb ] || continue
+      target="$(findmnt -rn -o TARGET -S "$dev")"
+      if [ -z "$target" ] || [ "$target" = "{{ usb_mount_point }}" ]; then
+        printf '%s\n' "$dev"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  register: usb_candidates
+  changed_when: false
+  when: usb_device == 'auto'
+
+- name: Require exactly one auto-detected USB partition
+  ansible.builtin.assert:
+    that: usb_candidates.stdout_lines | length == 1
+    fail_msg: "Expected exactly one unmounted USB partition; found {{ usb_candidates.stdout_lines | default([]) }}. Set usb_device explicitly in .env/group_vars.yml."
+  when: usb_device == 'auto'
+
+- name: Select USB device
+  ansible.builtin.set_fact:
+    selected_usb_device: "{{ (usb_candidates.stdout_lines | first) if usb_device == 'auto' else usb_device }}"
+
+- name: Read USB filesystem type
+  ansible.builtin.command: "blkid -o value -s TYPE {{ selected_usb_device }}"
+  register: usb_fstype
+  failed_when: false
+  changed_when: false
+
+- name: Check whether this USB volume was initialized by this project
+  ansible.builtin.stat:
+    path: "{{ usb_mount_point }}/.k3spi-initialized"
+  register: usb_initialized
+
+- name: Refuse an unformatted USB device by default
+  ansible.builtin.assert:
+    that: usb_fstype.stdout | length > 0 or usb_allow_format | bool or usb_force_format | bool
+    fail_msg: "{{ selected_usb_device }} has no filesystem. Set usb_allow_format=true only if it is safe to erase."
+
+- name: Format explicitly authorized blank USB device
+  community.general.filesystem:
+    dev: "{{ selected_usb_device }}"
+    fstype: ext4
+  when: usb_fstype.stdout | length == 0 and usb_allow_format | bool and not usb_force_format | bool
+
+- name: Unmount USB before explicitly requested reformat
+  ansible.posix.mount:
+    path: "{{ usb_mount_point }}"
+    state: unmounted
+  when: usb_force_format | bool and not usb_initialized.stat.exists
+
+- name: Force-format explicitly authorized USB device as ext4 once
+  community.general.filesystem:
+    dev: "{{ selected_usb_device }}"
+    fstype: ext4
+    force: true
+  when: usb_force_format | bool and not usb_initialized.stat.exists
+
+- name: Select resulting filesystem type
+  ansible.builtin.set_fact:
+    selected_usb_fstype: "{{ 'ext4' if (usb_force_format | bool or usb_fstype.stdout | length == 0) else usb_fstype.stdout }}"
+
+- name: Create USB mount point
+  ansible.builtin.file:
+    path: "{{ usb_mount_point }}"
+    state: directory
+    mode: "0755"
+
+- name: Read USB UUID
+  ansible.builtin.command: "blkid -o value -s UUID {{ selected_usb_device }}"
+  register: usb_uuid
+  changed_when: false
+
+- name: Persist USB mount
+  ansible.posix.mount:
+    path: "{{ usb_mount_point }}"
+    src: "UUID={{ usb_uuid.stdout }}"
+    fstype: "{{ selected_usb_fstype }}"
+    opts: defaults,nofail
+    state: mounted
+
+- name: Create k3s volume directory
+  ansible.builtin.file:
+    path: "{{ usb_mount_point }}/k3s-storage"
+    state: directory
+    mode: "0775"
+
+- name: Mark USB volume as initialized
+  ansible.builtin.command: "touch {{ usb_mount_point }}/.k3spi-initialized"
+  args:
+    creates: "{{ usb_mount_point }}/.k3spi-initialized"
+
+- name: Reboot after enabling memory cgroups
+  ansible.builtin.reboot:
+    reboot_timeout: 300
+  when: memory_cgroup_boot.changed
