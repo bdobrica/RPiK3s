@@ -25,3 +25,18 @@ prometheus_operator_version: v0.93.0
 flux_version: v2.9.2
 prometheus_image: quay.io/prometheus/prometheus:v3.11.2
 grafana_image: grafana/grafana:13.1.0
+
+# Optional ZFS SSD partitions (persistent by-id paths; nodes without SSDs omitted).
+# Existing /mnt/usb storage remains untouched. Use `make storage` to apply.
+ssd_devices: {}
+# Example:
+# ssd_devices:
+#   k3spi-00: /dev/disk/by-id/usb-YOUR_SSD_SERIAL-part1
+#   k3spi-01: /dev/disk/by-id/usb-ANOTHER_SSD_SERIAL-part1
+ssd_pool: ssd
+ssd_mount_point: /mnt/ssd
+ssd_allow_format: false
+ssd_force_format: false
+# Enable local ZFS, shared NFS, or both. No replication between SSDs.
+democratic_csi_modes: []  # [local, nfs]
+democratic_csi_nfs_host: ""  # e.g. k3spi-00; must be in ssd_devices

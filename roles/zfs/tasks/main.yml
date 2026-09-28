@@ -1,0 +1,106 @@
+---
+- name: Validate storage selection
+  ansible.builtin.assert:
+    that:
+      - democratic_csi_modes | difference(['local', 'nfs']) | length == 0
+      - ssd_devices.keys() | difference(groups['k3s_cluster']) | length == 0
+      - democratic_csi_modes | length == 0 or ssd_devices | length > 0
+      - "'nfs' not in democratic_csi_modes or democratic_csi_nfs_host in ssd_devices"
+      - inventory_hostname not in ssd_devices or ansible_facts.architecture == 'aarch64'
+
+- name: Install NFS clients
+  ansible.builtin.apt:
+    name: nfs-common
+    state: present
+  when: "'nfs' in democratic_csi_modes"
+
+- name: Prepare explicitly selected SSD nodes
+  when: inventory_hostname in ssd_devices
+  block:
+    - name: Install running kernel headers and ZFS
+      ansible.builtin.apt:
+        name:
+          - "linux-headers-{{ ansible_facts.kernel }}"
+          - zfs-dkms
+          - zfsutils-linux
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Load ZFS kernel module before touching storage
+      community.general.modprobe:
+        name: zfs
+        state: present
+        persistent: present
+
+    - name: Install guarded pool provisioning helper
+      ansible.builtin.copy:
+        src: prepare-pool.py
+        dest: /usr/local/sbin/k3spi-prepare-pool
+        mode: "0755"
+
+    - name: Create or import selected pool
+      ansible.builtin.command: >-
+        /usr/local/sbin/k3spi-prepare-pool
+        --device {{ ssd_devices[inventory_hostname] | quote }}
+        --pool {{ ssd_pool | quote }} --mountpoint {{ ssd_mount_point | quote }}
+        {{ '--allow-format' if ssd_allow_format | bool else '' }}
+        {{ '--force-format' if ssd_force_format | bool else '' }}
+      register: pool_prepare
+      changed_when: "'changed:' in pool_prepare.stdout"
+
+    - name: Enable pool import and mounting at boot
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        enabled: true
+        daemon_reload: true
+      loop: [zfs-import-cache, zfs-mount, zfs-share, zfs.target]
+
+    - name: Create separate volume and detached snapshot parents
+      community.general.zfs:
+        name: "{{ ssd_pool }}/{{ item }}"
+        state: present
+        extra_zfs_properties:
+          sharenfs: "off"
+      loop: [local, local-snapshots, nfs, nfs-snapshots]
+
+- name: Configure selected NFS storage server
+  when: "'nfs' in democratic_csi_modes and inventory_hostname == democratic_csi_nfs_host"
+  block:
+    - name: Install NFS server
+      ansible.builtin.apt:
+        name: nfs-kernel-server
+        state: present
+
+    - name: Start NFS server
+      ansible.builtin.systemd_service:
+        name: nfs-server
+        state: started
+        enabled: true
+
+    - name: Create dedicated CSI SSH account
+      ansible.builtin.user:
+        name: democratic-csi
+        create_home: true
+        shell: /bin/bash
+
+    - name: Create dedicated CSI key on the Ansible controller
+      ansible.builtin.command:
+        argv: [ssh-keygen, -q, -t, rsa, -b, '3072', -N, '', -f, "{{ playbook_dir }}/../.env/democratic-csi"]
+        creates: "{{ playbook_dir }}/../.env/democratic-csi"
+      delegate_to: localhost
+      become: false
+
+    - name: Authorize CSI key
+      ansible.posix.authorized_key:
+        user: democratic-csi
+        key: "{{ lookup('file', playbook_dir + '/../.env/democratic-csi.pub') }}"
+        key_options: no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty
+
+    - name: Allow driver storage management commands
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/democratic-csi
+        mode: "0440"
+        validate: /usr/sbin/visudo -cf %s
+        content: |
+          democratic-csi ALL=(root) NOPASSWD: /usr/sbin/zfs, /usr/sbin/zpool, /usr/bin/chmod, /usr/bin/chown

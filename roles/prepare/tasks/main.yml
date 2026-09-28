@@ -104,6 +104,9 @@
   ansible.builtin.shell: |
     set -o pipefail
     for dev in $(lsblk -nrpo NAME,TYPE | awk '$2 == "part" {print $1}'); do
+      {% if inventory_hostname in ssd_devices %}
+      [ "$(readlink -f "$dev")" = "$(readlink -f {{ ssd_devices[inventory_hostname] | quote }})" ] && continue
+      {% endif %}
       parent="$(lsblk -ndo PKNAME "$dev")"
       [ -n "$parent" ] || continue
       [ "$(lsblk -ndo TRAN "/dev/$parent")" = usb ] || continue

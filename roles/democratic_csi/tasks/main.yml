@@ -1,0 +1,107 @@
+---
+- name: Create CSI working directory
+  ansible.builtin.file:
+    path: /var/lib/k3spi/storage
+    state: directory
+    mode: "0700"
+
+- name: Fetch pinned snapshot CRDs and controller
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/{{ snapshot_controller_version }}/{{ item.path }}"
+    dest: "/var/lib/k3spi/storage/{{ item.name }}.yaml"
+    mode: "0644"
+  loop:
+    - { name: snapshot-crd, path: client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml }
+    - { name: snapshot-content-crd, path: client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml }
+    - { name: snapshot-class-crd, path: client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml }
+    - { name: snapshot-rbac, path: deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml }
+    - { name: snapshot-controller, path: deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml }
+
+- name: Enable snapshot routing to node-local CSI sidecars
+  ansible.builtin.lineinfile:
+    path: /var/lib/k3spi/storage/snapshot-controller.yaml
+    regexp: '^            - "--enable-distributed-snapshotting=.*"$'
+    insertafter: '^            - "--leader-election=true"$'
+    line: '            - "--enable-distributed-snapshotting={{ "true" if "local" in democratic_csi_modes else "false" }}"'
+
+- name: Provide node discovery permissions for distributed snapshots
+  ansible.builtin.copy:
+    src: snapshot-node-rbac.yaml
+    dest: /var/lib/k3spi/storage/snapshot-node-rbac.yaml
+    mode: "0644"
+
+- name: Install snapshot API and controller
+  ansible.builtin.command: "k3s kubectl apply --server-side -f /var/lib/k3spi/storage/{{ item }}.yaml"
+  loop: [snapshot-crd, snapshot-content-crd, snapshot-class-crd, snapshot-rbac, snapshot-node-rbac, snapshot-controller]
+  register: snapshot_apply
+  changed_when: "'created' in snapshot_apply.stdout or 'configured' in snapshot_apply.stdout"
+
+- name: Wait for snapshot controller
+  ansible.builtin.command: k3s kubectl -n kube-system rollout status deployment/snapshot-controller --timeout=180s
+  changed_when: false
+
+- name: Label verified ZFS nodes for local CSI
+  ansible.builtin.command: "k3s kubectl label node {{ item }} storage.k3spi.io/zfs=true --overwrite"
+  loop: "{{ ssd_devices.keys() | list }}"
+  register: zfs_label
+  changed_when: "'not labeled' not in zfs_label.stdout"
+
+- name: Create CSI namespace
+  ansible.builtin.command: k3s kubectl create namespace democratic-csi
+  register: csi_namespace
+  failed_when: csi_namespace.rc != 0 and 'AlreadyExists' not in csi_namespace.stderr
+  changed_when: csi_namespace.rc == 0
+
+- name: Apply dedicated NFS driver credential
+  ansible.builtin.command:
+    argv: [k3s, kubectl, apply, -f, '-']
+    stdin: "{{ lookup('template', 'nfs-secret.yaml.j2') }}"
+  no_log: true
+  when: "'nfs' in democratic_csi_modes"
+
+- name: Render k3s managed Helm releases
+  ansible.builtin.template:
+    src: driver.yaml.j2
+    dest: "/var/lib/k3spi/storage/democratic-csi-{{ item }}.yaml"
+    mode: "0644"
+  loop: "{{ democratic_csi_modes }}"
+
+- name: Apply CSI Helm releases
+  ansible.builtin.command: "k3s kubectl apply -f /var/lib/k3spi/storage/democratic-csi-{{ item }}.yaml"
+  loop: "{{ democratic_csi_modes }}"
+  register: csi_apply
+  changed_when: "'created' in csi_apply.stdout or 'configured' in csi_apply.stdout"
+
+- name: Wait for CSI daemonsets to be created by Helm
+  ansible.builtin.command: "k3s kubectl -n democratic-csi get daemonset democratic-csi-{{ item }}-node"
+  loop: "{{ democratic_csi_modes }}"
+  register: csi_daemonset
+  retries: 60
+  delay: 10
+  until: csi_daemonset.rc == 0
+  changed_when: false
+
+- name: Wait for Helm install jobs to succeed
+  ansible.builtin.command: >-
+    k3s kubectl -n kube-system get job helm-install-democratic-csi-{{ item }}
+    -o jsonpath='{.status.succeeded}'
+  loop: "{{ democratic_csi_modes }}"
+  register: csi_helm_job
+  retries: 90
+  delay: 10
+  until: csi_helm_job.rc == 0 and csi_helm_job.stdout == '1'
+  changed_when: false
+
+- name: Wait for CSI node services
+  ansible.builtin.command: "k3s kubectl -n democratic-csi rollout status daemonset/democratic-csi-{{ item }}-node --timeout=300s"
+  loop: "{{ democratic_csi_modes }}"
+  register: csi_rollout
+  retries: 6
+  delay: 10
+  until: csi_rollout.rc == 0
+  changed_when: false
+
+- name: Wait for NFS CSI controller
+  ansible.builtin.command: k3s kubectl -n democratic-csi rollout status deployment/democratic-csi-nfs-controller --timeout=300s
+  when: "'nfs' in democratic_csi_modes"
+  changed_when: false

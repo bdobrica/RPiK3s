@@ -1,0 +1,36 @@
+---
+- name: Prepare selected SSDs and storage clients
+  hosts: k3s_cluster
+  any_errors_fatal: true
+  become: true
+  gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  pre_tasks:
+    - name: Load optional private overrides
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      with_first_found:
+        - files: [group_vars.yml]
+          paths: ["{{ playbook_dir }}/../.env"]
+          skip: true
+  roles:
+    - zfs
+
+- name: Install democratic-csi and snapshot support
+  hosts: control_plane
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  pre_tasks:
+    - name: Load optional private overrides
+      ansible.builtin.include_vars:
+        file: "{{ item }}"
+      with_first_found:
+        - files: [group_vars.yml]
+          paths: ["{{ playbook_dir }}/../.env"]
+          skip: true
+  roles:
+    - role: democratic_csi
+      when: democratic_csi_modes | length > 0

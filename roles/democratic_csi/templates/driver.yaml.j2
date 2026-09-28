@@ -1,0 +1,88 @@
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: democratic-csi-{{ item }}
+  namespace: kube-system
+spec:
+  repo: https://democratic-csi.github.io/charts/
+  chart: democratic-csi
+  version: {{ democratic_csi_chart_version | to_json }}
+  targetNamespace: democratic-csi
+  createNamespace: true
+  valuesContent: |
+    csiDriver:
+      name: org.democratic-csi.{{ item }}
+      attachRequired: false
+      fsGroupPolicy: File
+{% if item == 'local' %}
+      storageCapacity: true
+{% endif %}
+    storageClasses:
+      - name: zfs-{{ item }}
+        defaultClass: false
+        reclaimPolicy: Retain
+        volumeBindingMode: {{ 'WaitForFirstConsumer' if item == 'local' else 'Immediate' }}
+        allowVolumeExpansion: {{ 'false' if item == 'local' else 'true' }}
+        parameters:
+          fsType: {{ 'zfs' if item == 'local' else 'nfs' }}
+{% if item == 'nfs' %}
+        mountOptions: [nfsvers=4.1, hard, noatime]
+{% endif %}
+    volumeSnapshotClasses:
+      - name: zfs-{{ item }}
+        deletionPolicy: Retain
+        parameters:
+          detachedSnapshots: "false"
+    controller:
+{% if item == 'nfs' %}
+      podAnnotations:
+        storage.k3spi.io/config-hash: "{{ lookup('template', 'nfs-secret.yaml.j2') | hash('sha256') }}"
+{% endif %}
+      strategy: {{ 'node' if item == 'local' else 'deployment' }}
+      driver:
+        image:
+          tag: {{ democratic_csi_image_tag }}
+      externalAttacher:
+        enabled: false
+{% if item == 'local' %}
+      externalResizer:
+        enabled: false
+      externalProvisioner:
+        extraArgs:
+          - --leader-election=false
+          - --node-deployment=true
+          - --node-deployment-immediate-binding=true
+          - --feature-gates=Topology=true
+          - --strict-topology=true
+          - --enable-capacity=true
+          - --capacity-ownerref-level=1
+      externalSnapshotter:
+        enabled: true
+        extraArgs: [--leader-election=false, --node-deployment=true]
+{% endif %}
+    node:
+{% if item == 'nfs' %}
+      podAnnotations:
+        storage.k3spi.io/config-hash: "{{ lookup('template', 'nfs-secret.yaml.j2') | hash('sha256') }}"
+{% endif %}
+      kubeletHostPath: /var/lib/kubelet
+      driver:
+        image:
+          tag: {{ democratic_csi_image_tag }}
+{% if item == 'local' %}
+      nodeSelector:
+        storage.k3spi.io/zfs: "true"
+{% endif %}
+    driver:
+{% if item == 'nfs' %}
+      existingConfigSecret: democratic-csi-nfs-config
+{% endif %}
+      config:
+        driver: {{ 'zfs-local-dataset' if item == 'local' else 'zfs-generic-nfs' }}
+{% if item == 'local' %}
+        zfs:
+          datasetParentName: {{ ssd_pool }}/local
+          detachedSnapshotsDatasetParentName: {{ ssd_pool }}/local-snapshots
+          datasetEnableQuotas: true
+          datasetEnableReservation: false
+{% endif %}

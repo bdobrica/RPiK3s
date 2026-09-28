@@ -70,6 +70,14 @@ from formatting the managed volume again.
 The k3s local-path provisioner stores new local volumes under
 `/mnt/usb/k3s-storage`. These volumes remain node-local and are not replicated.
 
+## Optional ZFS SSDs and CSI storage
+
+Configure SSD partitions and enable node-local ZFS, shared ZFS-backed NFS, or
+both with `make storage`. Includes CSI snapshots and restore support. See
+[storage setup, safety, and limitations](docs/storage.md). Existing USB local-path
+volumes remain in place. NFS supports workload rescheduling across nodes; neither
+mode replicates data between SSDs.
+
 ## Networking
 
 The automation assigns consecutive static `eth0` addresses and adds every node

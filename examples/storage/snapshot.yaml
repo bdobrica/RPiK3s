@@ -1,0 +1,8 @@
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: example-data-snapshot
+spec:
+  volumeSnapshotClassName: zfs-nfs
+  source:
+    persistentVolumeClaimName: example-data

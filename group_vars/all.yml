@@ -20,3 +20,15 @@ grafana_image: grafana/grafana:13.1.0
 prometheus_retention_size: 1GB
 prometheus_storage_size: 2Gi
 grafana_storage_size: 1Gi
+# Optional SSDs: explicit persistent device paths keyed by inventory hostname.
+ssd_devices: {}
+ssd_pool: ssd
+ssd_mount_point: /mnt/ssd
+ssd_allow_format: false
+ssd_force_format: false
+# Install both classes independently; neither changes the default StorageClass.
+democratic_csi_modes: []  # local, nfs
+democratic_csi_nfs_host: ""
+democratic_csi_chart_version: 0.15.1
+democratic_csi_image_tag: v1.9.5
+snapshot_controller_version: v8.6.0
